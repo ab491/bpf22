@@ -28,5 +28,5 @@ foreach(fil_path ${INPUT_FILES})
     add_some_kind_of_target(${outfilename} ${infile_path} ${outfilename})
     add_dependencies(filters ${outfilename})
 
-    INSTALL(FILES ${CMAKE_CURRENT_BINARY_DIR}/${outfilename} DESTINATION share)
+    INSTALL(FILES ${CMAKE_CURRENT_BINARY_DIR}/${outfilename} DESTINATION share/bcc/bsmart)
 endforeach()
