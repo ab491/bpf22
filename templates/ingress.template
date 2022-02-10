@@ -1,0 +1,113 @@
+/* Copyright 2019 Kai Lüke <kailueke@riseup.net>
+ * SPDX-License-Identifier: GPL-2.0
+ *
+ * Minimal configurable packet filter, parses IP/IPv6 packets, ICMP, UDP ports,
+ * and TCP ports. The forward rule is a C expression passed as FILTER variable
+ * to the compiler with -D. The expression can use the boolean variables
+ * [udp, tcp, icmp, ip, ipv6] and the integers [dst_port, src_port].
+ * If the expression evaluates to 0 (false), the packet will be dropped.
+ */
+
+ /* Workaround for "/usr/include/gnu/stubs.h:7:11: fatal error: 'gnu/stubs-32.h' file not found" */
+#define __aarch64__
+
+#include <linux/bpf.h>
+#include "bpf_api.h"
+#include <linux/in.h>
+#include <linux/if.h>
+#include <linux/if_ether.h>
+#include <linux/ip.h>
+#include <linux/ipv6.h>
+#include <linux/if_tunnel.h>
+#include <linux/icmp.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
+#include <sys/socket.h>
+#include <linux/if_packet.h>
+
+#include <linux/ptrace.h>
+
+#ifndef __section
+# define __section(NAME)                  \
+   __attribute__((section(NAME), used))
+#endif
+
+#define BPF_PACKET_HEADER __attribute__((packed))
+
+struct pony_header
+{
+  __u32 message_id;       /**< Message ID */
+  __u32 length;           /**< Length of the datagram, <b>starting from the <tt>client_id</tt> member</b> */
+  __u16 client_id;        /**< Client ID */
+  __u16 session_id;       /**< Session ID, always 0x0000 */
+  __u8 protocol_version;  /**< Protocol Version, always 0x01 otherwise ignore message */
+  __u8 interface_version; /**< Interface Version, starting with 0x01 */
+  __u8 message_type;      /**< Message Type, always 0x01 (F&F) */
+  __u8 return_code;       /**< Return Code, always 0x00 */
+} BPF_PACKET_HEADER;
+
+/* cgroup/skb BPF prog */
+__section("filter")
+int port_firewall(struct __sk_buff *skb) {
+  __u8 udp = 0, tcp = 0, icmp = 0, ip = 0, ipv6 = 0;
+  __u16 dst_port = 0;
+  __u16 src_port = 0;
+  
+  __u8 DO_FORWARD = 0;
+
+  void *data = (void *)(long)skb->data;
+  void *data_end = (void *)(long)skb->data_end;
+
+  ip = skb->protocol == htons(ETH_P_IP);
+  ipv6 = skb->protocol == htons(ETH_P_IPV6);
+
+  if (ip) {
+    if (data + sizeof(struct iphdr) > data_end) { return 0; }
+    struct iphdr *ip = data;
+   
+    if (ip->protocol == IPPROTO_UDP) {
+      __u8 *ihlandversion = data;
+      __u8 ihlen = (*ihlandversion & 0xf) * 4;
+      if (data + ihlen + sizeof(struct udphdr) > data_end) { return 0; }
+      struct udphdr *udp = data + ihlen;
+      __u16 src_port = ntohs(udp->source);
+      __u16 dst_port = ntohs(udp->dest);
+      
+      /* Allow only UDP-messages at port 7788 */
+      if ((src_port != 7788) || (dst_port != 7788)) { return 0; }
+      
+      __u16 body_len = ntohs(udp->len) - sizeof(struct udphdr);
+      if (body_len < sizeof(struct pony_header)) { return 0; }      
+
+      if (data + ihlen + sizeof(struct udphdr) + sizeof(struct pony_header) > data_end) { return 0;}
+      struct pony_header* ph = data + ihlen + sizeof(struct udphdr);
+      
+      // pony header fields are in BigEndian format      
+      __u32 msg_id = 0;
+      msg_id |= (ph->message_id >> 24) & 0xFF;
+      msg_id |= ((ph->message_id >> 16) & 0xFF) << 8;
+      msg_id |= ((ph->message_id >> 8) & 0xFF) << 16;
+      msg_id |= ((ph->message_id >> 0) & 0xFF) << 24;
+      
+      __u16 clt_id = 0;
+      clt_id |= ((ph->client_id >> 8) & 0xFF);
+      clt_id |= ((ph->client_id >> 0) & 0xFF) << 8;
+
+      
+      /* Whitelisted message IDs */
+      if (
+         __PLACE_MSG_FILTER_HERE__
+      ) DO_FORWARD = 1;
+      
+      if (DO_FORWARD == 1){
+        printt("clt_id:%x, msg_id:%x (allow)\n",(int)clt_id,msg_id);
+        return 1;        
+      }
+      
+    }
+  }
+
+  return 0; /* 0 = drop */
+}
+
+char __license[] __section("license") = "GPL";
